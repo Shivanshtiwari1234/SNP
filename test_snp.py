@@ -88,5 +88,18 @@ class SNPTests(unittest.TestCase):
             encode_packet(TYPE_MESSAGE, 0x100000000, b"test")
 
 
+    def test_binary_payload_round_trip(self):
+        payload = b"\x00\x01\x02\x7f\xff\x80\x00\x99"
+        packet = encode_packet(TYPE_MESSAGE, 99, payload)
+        self.assertEqual(decode_packet(packet), (TYPE_MESSAGE, 99, payload))
+
+    def test_non_bytes_input_rejected(self):
+        with self.assertRaises(SNPError):
+            decode_packet(None)
+
+        with self.assertRaises(SNPError):
+            decode_packet("not-bytes")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -34,6 +34,13 @@ def encode_packet(message_type: int, sequence: int, payload: bytes) -> bytes:
     if not 0 <= sequence <= 0xFFFFFFFF:
         raise SNPError("Sequence number out of range")
 
+    if isinstance(payload, memoryview):
+        payload = payload.tobytes()
+    elif isinstance(payload, bytearray):
+        payload = bytes(payload)
+    elif not isinstance(payload, (bytes, bytearray, memoryview)):
+        raise SNPError("Payload must be bytes-like data")
+
     if len(payload) > MAX_PAYLOAD:
         raise SNPError(f"Payload exceeds {MAX_PAYLOAD} bytes")
 
@@ -49,6 +56,13 @@ def encode_packet(message_type: int, sequence: int, payload: bytes) -> bytes:
 
 def decode_packet(packet: bytes) -> tuple[int, int, bytes]:
     """Validate and deserialize an SNP packet."""
+    if isinstance(packet, memoryview):
+        packet = packet.tobytes()
+    elif isinstance(packet, bytearray):
+        packet = bytes(packet)
+    elif not isinstance(packet, (bytes, bytearray, memoryview)):
+        raise SNPError("Packet must be bytes-like data")
+
     if len(packet) < HEADER_SIZE:
         raise SNPError("Packet is shorter than the SNP header")
 
