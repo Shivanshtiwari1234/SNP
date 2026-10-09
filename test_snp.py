@@ -10,14 +10,17 @@ from snp import (
     TYPE_MESSAGE,
     TYPE_RESPONSE,
     TYPE_ACK,
+    TYPE_FRAGMENT,
     MAX_PAYLOAD,
     SNPError,
     RequestTracker,
     ResponseCache,
     SNPClient,
     SNPServer,
+    FragmentAssembler,
     encode_packet,
     decode_packet,
+    fragment_message,
     next_sequence,
     send_reliable_message,
 )
@@ -181,6 +184,36 @@ class SNPTests(unittest.TestCase):
                 self.assertEqual(client.request("Hello from SNP API"), "Received: Hello from SNP API")
         finally:
             server.stop()
+
+    def test_fragmented_message_round_trip(self):
+        payload = b"A" * 6000
+        packets = fragment_message(7, payload)
+
+        self.assertGreater(len(packets), 1)
+        assembler = FragmentAssembler()
+        assembled = b""
+
+        for packet in packets:
+            message_type, sequence, fragment_payload = decode_packet(packet)
+            self.assertEqual(message_type, TYPE_FRAGMENT)
+            result = assembler.add_packet(packet)
+            if result is not None:
+                assembled = result
+
+        self.assertEqual(assembled, payload)
+
+    def test_fragment_malformed_and_duplicate_input(self):
+        assembler = FragmentAssembler()
+        malformed = encode_packet(TYPE_FRAGMENT, 7, b"bad")
+
+        with self.assertRaises(SNPError):
+            assembler.add_packet(malformed)
+
+        payload = b"B" * 2000
+        packets = fragment_message(9, payload)
+        self.assertGreater(len(packets), 1)
+        self.assertIsNone(assembler.add_packet(packets[0]))
+        self.assertIsNone(assembler.add_packet(packets[0]))
 
 
 if __name__ == "__main__":

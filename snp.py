@@ -16,6 +16,7 @@ VERSION = 1
 TYPE_MESSAGE = 1
 TYPE_RESPONSE = 2
 TYPE_ACK = 3
+TYPE_FRAGMENT = 4
 
 # magic, version, type, sequence number, payload length
 HEADER = struct.Struct("!4sBBIH")
@@ -24,6 +25,7 @@ HEADER_SIZE = HEADER.size
 MAX_PAYLOAD = 1200
 MAX_PACKET = HEADER_SIZE + MAX_PAYLOAD
 MAX_SEQUENCE = 0xFFFFFFFF
+FRAGMENT_HEADER = struct.Struct("!HH")
 RELIABLE_TIMEOUT = 1.0
 RELIABLE_MAX_RETRIES = 3
 RELIABLE_BACKOFF = 0.25
@@ -95,9 +97,83 @@ class ResponseCache:
         return entry[1]
 
 
+class FragmentAssembler:
+    """Reassemble fragmented SNP payloads ordered by fragment index."""
+
+    def __init__(self, max_pending: int = 64, ttl_seconds: int = 30) -> None:
+        self.max_pending = max(1, max_pending)
+        self.ttl_seconds = max(1, ttl_seconds)
+        self._states: dict[int, dict[str, object]] = {}
+
+    def _purge_expired(self) -> None:
+        cutoff = time.monotonic() - self.ttl_seconds
+        for sequence, state in list(self._states.items()):
+            if state["created"] <= cutoff:
+                del self._states[sequence]
+
+    def add_packet(self, packet: bytes) -> bytes | None:
+        message_type, sequence, payload = decode_packet(packet)
+
+        if message_type != TYPE_FRAGMENT:
+            raise SNPError("Packet is not an SNP fragment")
+
+        if len(payload) < FRAGMENT_HEADER.size:
+            raise SNPError("Fragment payload is too short")
+
+        fragment_index, fragment_total = FRAGMENT_HEADER.unpack_from(payload[: FRAGMENT_HEADER.size])
+        fragment_data = payload[FRAGMENT_HEADER.size :]
+
+        if fragment_total <= 0 or fragment_index >= fragment_total:
+            raise SNPError("Fragment metadata is invalid")
+
+        self._purge_expired()
+        if len(self._states) >= self.max_pending:
+            oldest_sequence = next(iter(self._states))
+            del self._states[oldest_sequence]
+
+        state = self._states.setdefault(sequence, {"created": time.monotonic(), "parts": {}, "total": fragment_total})
+        if state["total"] != fragment_total:
+            raise SNPError("Fragment count mismatch")
+
+        parts = state["parts"]
+        if fragment_index in parts:
+            return None
+
+        parts[fragment_index] = fragment_data
+        if len(parts) == fragment_total:
+            assembled = b"".join(parts[index] for index in range(fragment_total))
+            del self._states[sequence]
+            return assembled
+        return None
+
+
+def fragment_message(sequence: int, payload: bytes) -> list[bytes]:
+    """Split a logical payload into consecutive SNP fragment datagrams."""
+    if not isinstance(payload, (bytes, bytearray, memoryview)):
+        raise SNPError("Payload must be bytes-like data")
+
+    payload = bytes(payload)
+    if len(payload) <= MAX_PAYLOAD:
+        return [encode_packet(TYPE_MESSAGE, sequence, payload)]
+
+    fragment_size = MAX_PAYLOAD - FRAGMENT_HEADER.size
+    total_fragments = (len(payload) + fragment_size - 1) // fragment_size
+
+    if total_fragments > 0xFFFF:
+        raise SNPError("Message exceeds the supported fragment count")
+
+    fragments: list[bytes] = []
+    for index in range(total_fragments):
+        start = index * fragment_size
+        end = min(start + fragment_size, len(payload))
+        fragment_payload = FRAGMENT_HEADER.pack(index, total_fragments) + payload[start:end]
+        fragments.append(encode_packet(TYPE_FRAGMENT, sequence, fragment_payload))
+    return fragments
+
+
 def encode_packet(message_type: int, sequence: int, payload: bytes) -> bytes:
     """Serialize an SNP packet into bytes."""
-    if message_type not in (TYPE_MESSAGE, TYPE_RESPONSE, TYPE_ACK):
+    if message_type not in (TYPE_MESSAGE, TYPE_RESPONSE, TYPE_ACK, TYPE_FRAGMENT):
         raise SNPError("Unsupported message type")
 
     if not 0 <= sequence <= 0xFFFFFFFF:
@@ -146,7 +222,7 @@ def decode_packet(packet: bytes) -> tuple[int, int, bytes]:
     if version != VERSION:
         raise SNPError(f"Unsupported SNP version: {version}")
 
-    if message_type not in (TYPE_MESSAGE, TYPE_RESPONSE, TYPE_ACK):
+    if message_type not in (TYPE_MESSAGE, TYPE_RESPONSE, TYPE_ACK, TYPE_FRAGMENT):
         raise SNPError(f"Unknown message type: {message_type}")
 
     payload = packet[HEADER_SIZE:]
@@ -202,6 +278,7 @@ class SNPServer:
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         self._cache = ResponseCache()
+        self._fragment_assembler = FragmentAssembler()
         self._ready = threading.Event()
 
     @property
@@ -240,6 +317,13 @@ class SNPServer:
 
             try:
                 message_type, sequence, payload = decode_packet(packet)
+
+                if message_type == TYPE_FRAGMENT:
+                    assembled = self._fragment_assembler.add_packet(packet)
+                    if assembled is None:
+                        continue
+                    payload = assembled
+                    message_type = TYPE_MESSAGE
 
                 if message_type != TYPE_MESSAGE:
                     print(f"Ignored non-message packet from {address}")
@@ -281,11 +365,19 @@ def run_server(host: str, port: int) -> None:
         server.bind((host, port))
         print(f"SNP server listening on {host}:{port} (UDP)")
 
+        fragment_assembler = FragmentAssembler()
         while True:
             packet, address = server.recvfrom(MAX_PACKET + 1)
 
             try:
                 message_type, sequence, payload = decode_packet(packet)
+
+                if message_type == TYPE_FRAGMENT:
+                    assembled = fragment_assembler.add_packet(packet)
+                    if assembled is None:
+                        continue
+                    payload = assembled
+                    message_type = TYPE_MESSAGE
 
                 if message_type != TYPE_MESSAGE:
                     print(f"Ignored non-message packet from {address}")

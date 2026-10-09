@@ -176,6 +176,16 @@ with SNPClient("127.0.0.1", 9000) as client:
 
 The client sends the request with a valid sequence number, waits for the matching SNP response, and raises a predictable error if the remote side does not respond within the configured timeout.
 
+## Application-level fragmentation
+
+Large logical messages may be split into multiple SNP datagrams with a `TYPE_FRAGMENT` packet. Each fragment carries a two-byte fragment index and a two-byte total-fragment count in the payload prefix:
+
+```text
+payload = [index: 2 bytes][total: 2 bytes][fragment_data]
+```
+
+The receiver reassembles fragments in order by sequence number and accepts duplicate fragments without reprocessing the logical payload. Messages that fit within a single SNP datagram remain unfragmented and continue to use the normal `MESSAGE` packet type.
+
 ## Running the tests
 
 Use the standard library test runner:
