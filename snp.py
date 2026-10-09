@@ -3,6 +3,7 @@
 """Shivi Network Protocol (SNP) — initial implementation."""
 
 import argparse
+import json
 import socket
 import struct
 import sys
@@ -17,6 +18,8 @@ TYPE_MESSAGE = 1
 TYPE_RESPONSE = 2
 TYPE_ACK = 3
 TYPE_FRAGMENT = 4
+TYPE_DISCOVERY_REQUEST = 5
+TYPE_DISCOVERY_RESPONSE = 6
 
 # magic, version, type, sequence number, payload length
 HEADER = struct.Struct("!4sBBIH")
@@ -173,7 +176,7 @@ def fragment_message(sequence: int, payload: bytes) -> list[bytes]:
 
 def encode_packet(message_type: int, sequence: int, payload: bytes) -> bytes:
     """Serialize an SNP packet into bytes."""
-    if message_type not in (TYPE_MESSAGE, TYPE_RESPONSE, TYPE_ACK, TYPE_FRAGMENT):
+    if message_type not in (TYPE_MESSAGE, TYPE_RESPONSE, TYPE_ACK, TYPE_FRAGMENT, TYPE_DISCOVERY_REQUEST, TYPE_DISCOVERY_RESPONSE):
         raise SNPError("Unsupported message type")
 
     if not 0 <= sequence <= 0xFFFFFFFF:
@@ -222,7 +225,7 @@ def decode_packet(packet: bytes) -> tuple[int, int, bytes]:
     if version != VERSION:
         raise SNPError(f"Unsupported SNP version: {version}")
 
-    if message_type not in (TYPE_MESSAGE, TYPE_RESPONSE, TYPE_ACK, TYPE_FRAGMENT):
+    if message_type not in (TYPE_MESSAGE, TYPE_RESPONSE, TYPE_ACK, TYPE_FRAGMENT, TYPE_DISCOVERY_REQUEST, TYPE_DISCOVERY_RESPONSE):
         raise SNPError(f"Unknown message type: {message_type}")
 
     payload = packet[HEADER_SIZE:]
@@ -318,6 +321,15 @@ class SNPServer:
             try:
                 message_type, sequence, payload = decode_packet(packet)
 
+                if message_type == TYPE_DISCOVERY_REQUEST:
+                    response = encode_packet(
+                        TYPE_DISCOVERY_RESPONSE,
+                        sequence,
+                        json.dumps({"service": "snp", "version": VERSION, "port": self.port}).encode("utf-8"),
+                    )
+                    self._socket.sendto(response, address)
+                    continue
+
                 if message_type == TYPE_FRAGMENT:
                     assembled = self._fragment_assembler.add_packet(packet)
                     if assembled is None:
@@ -357,6 +369,35 @@ class SNPServer:
         self._socket = None
 
 
+def discover_peers(host: str = "127.0.0.1", port: int = 9000, *, timeout: float = 0.5, max_responses: int = 16) -> list[dict[str, object]]:
+    """Send a discovery request and parse the peer metadata replies."""
+    peers: list[dict[str, object]] = []
+    request = encode_packet(TYPE_DISCOVERY_REQUEST, 0, b"discover")
+
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as client:
+        client.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        client.settimeout(timeout)
+        client.sendto(request, (host, port))
+
+        while len(peers) < max_responses:
+            try:
+                response, address = client.recvfrom(MAX_PACKET + 1)
+            except socket.timeout:
+                break
+
+            try:
+                message_type, _, payload = decode_packet(response)
+                if message_type != TYPE_DISCOVERY_RESPONSE:
+                    continue
+                metadata = json.loads(payload.decode("utf-8"))
+            except (SNPError, UnicodeDecodeError, json.JSONDecodeError):
+                continue
+
+            peers.append({"host": address[0], "port": metadata.get("port", port), "service": metadata.get("service", "snp"), "version": metadata.get("version", VERSION)})
+
+    return peers
+
+
 def run_server(host: str, port: int) -> None:
     """Listen for SNP messages and respond to clients over UDP."""
     cache = ResponseCache()
@@ -371,6 +412,15 @@ def run_server(host: str, port: int) -> None:
 
             try:
                 message_type, sequence, payload = decode_packet(packet)
+
+                if message_type == TYPE_DISCOVERY_REQUEST:
+                    response = encode_packet(
+                        TYPE_DISCOVERY_RESPONSE,
+                        sequence,
+                        json.dumps({"service": "snp", "version": VERSION, "port": port}).encode("utf-8"),
+                    )
+                    server.sendto(response, address)
+                    continue
 
                 if message_type == TYPE_FRAGMENT:
                     assembled = fragment_assembler.add_packet(packet)

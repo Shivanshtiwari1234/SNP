@@ -186,6 +186,19 @@ payload = [index: 2 bytes][total: 2 bytes][fragment_data]
 
 The receiver reassembles fragments in order by sequence number and accepts duplicate fragments without reprocessing the logical payload. Messages that fit within a single SNP datagram remain unfragmented and continue to use the normal `MESSAGE` packet type.
 
+## Peer discovery
+
+SNP supports an optional local UDP discovery request/response for peers on the same network segment. A discovery request uses a `TYPE_DISCOVERY_REQUEST` packet with payload `discover`; a discovery response returns JSON metadata describing the peer service, protocol version, and UDP port.
+
+```python
+from snp import discover_peers
+
+peers = discover_peers("127.0.0.1", 9000, timeout=0.5)
+print(peers)
+```
+
+This mechanism is intentionally lightweight and does not establish trust or authentication. A discovered peer is only an addressable SNP endpoint, not an authenticated service.
+
 ## Running the tests
 
 Use the standard library test runner:

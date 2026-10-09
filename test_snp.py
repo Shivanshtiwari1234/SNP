@@ -1,4 +1,6 @@
 
+import socket
+import threading
 import unittest
 import struct
 
@@ -11,6 +13,9 @@ from snp import (
     TYPE_RESPONSE,
     TYPE_ACK,
     TYPE_FRAGMENT,
+    TYPE_DISCOVERY_REQUEST,
+    TYPE_DISCOVERY_RESPONSE,
+    MAX_PACKET,
     MAX_PAYLOAD,
     SNPError,
     RequestTracker,
@@ -18,6 +23,7 @@ from snp import (
     SNPClient,
     SNPServer,
     FragmentAssembler,
+    discover_peers,
     encode_packet,
     decode_packet,
     fragment_message,
@@ -214,6 +220,29 @@ class SNPTests(unittest.TestCase):
         self.assertGreater(len(packets), 1)
         self.assertIsNone(assembler.add_packet(packets[0]))
         self.assertIsNone(assembler.add_packet(packets[0]))
+
+    def test_peer_discovery_round_trip(self):
+        responder = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        responder.bind(("127.0.0.1", 0))
+        port = responder.getsockname()[1]
+
+        def serve_once():
+            packet, address = responder.recvfrom(MAX_PACKET + 1)
+            message_type, sequence, payload = decode_packet(packet)
+            self.assertEqual(message_type, TYPE_DISCOVERY_REQUEST)
+            self.assertEqual(payload, b"discover")
+            responder.sendto(
+                encode_packet(TYPE_DISCOVERY_RESPONSE, sequence, b"{\"service\":\"snp\",\"version\":1,\"port\":%d}" % port),
+                address,
+            )
+
+        thread = threading.Thread(target=serve_once, daemon=True)
+        thread.start()
+
+        peers = discover_peers("127.0.0.1", port, timeout=0.2)
+        self.assertTrue(peers)
+        self.assertIn("snp", peers[0].get("service", ""))
+        responder.close()
 
 
 if __name__ == "__main__":
