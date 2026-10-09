@@ -68,6 +68,18 @@ class SNPTests(unittest.TestCase):
         with self.assertRaises(SNPError):
             encode_packet(TYPE_MESSAGE, 1, b"x" * (MAX_PAYLOAD + 1))
 
+    def test_arbitrary_binary_payload_round_trip(self):
+        payload = b"\x00\x01\x7f\x80\xff\x10\x11\x12\x13\x14\x15"
+        packet = encode_packet(TYPE_MESSAGE, 10, payload)
+        self.assertEqual(decode_packet(packet), (TYPE_MESSAGE, 10, payload))
+
+    def test_non_bytes_payload_rejected(self):
+        with self.assertRaises(SNPError):
+            encode_packet(TYPE_MESSAGE, 1, None)
+
+        with self.assertRaises(SNPError):
+            decode_packet(None)
+
     def test_invalid_message_type_rejected(self):
         with self.assertRaises(SNPError):
             encode_packet(99, 1, b"test")
