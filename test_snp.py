@@ -14,6 +14,8 @@ from snp import (
     SNPError,
     RequestTracker,
     ResponseCache,
+    SNPClient,
+    SNPServer,
     encode_packet,
     decode_packet,
     next_sequence,
@@ -170,6 +172,15 @@ class SNPTests(unittest.TestCase):
 
         self.assertEqual(response, "OK")
         self.assertEqual(calls["count"], 2)
+
+    def test_client_server_round_trip(self):
+        server = SNPServer("127.0.0.1", 0)
+        server.start()
+        try:
+            with SNPClient("127.0.0.1", server.port) as client:
+                self.assertEqual(client.request("Hello from SNP API"), "Received: Hello from SNP API")
+        finally:
+            server.stop()
 
 
 if __name__ == "__main__":

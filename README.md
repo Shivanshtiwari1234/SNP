@@ -162,6 +162,20 @@ python snp.py send "Hello from SNP!" --host 127.0.0.1 --port 9000
 
 The client sends a MESSAGE packet and waits for a RESPONSE packet with the same sequence number.
 
+## Public peer API
+
+The project also exposes a small synchronous client/server API for convenient request/response usage:
+
+```python
+from snp import SNPClient
+
+with SNPClient("127.0.0.1", 9000) as client:
+    response = client.request("Hello from SNP!")
+    print(response)
+```
+
+The client sends the request with a valid sequence number, waits for the matching SNP response, and raises a predictable error if the remote side does not respond within the configured timeout.
+
 ## Running the tests
 
 Use the standard library test runner:

@@ -6,6 +6,7 @@ import argparse
 import socket
 import struct
 import sys
+import threading
 import time
 
 # SNP wire format
@@ -156,6 +157,122 @@ def decode_packet(packet: bytes) -> tuple[int, int, bytes]:
     return message_type, sequence, payload
 
 
+class SNPClient:
+    """Simplified public client API for synchronous SNP request/response calls."""
+
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        *,
+        timeout: float = RELIABLE_TIMEOUT,
+        max_retries: int = RELIABLE_MAX_RETRIES,
+        backoff: float = RELIABLE_BACKOFF,
+    ) -> None:
+        self.host = host
+        self.port = port
+        self.timeout = timeout
+        self.max_retries = max_retries
+        self.backoff = backoff
+
+    def request(self, message: str) -> str:
+        return send_reliable_message(
+            self.host,
+            self.port,
+            message,
+            timeout=self.timeout,
+            max_retries=self.max_retries,
+            backoff=self.backoff,
+        )
+
+    def __enter__(self) -> "SNPClient":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        return False
+
+
+class SNPServer:
+    """Small UDP server wrapper for local SNP request/response handling."""
+
+    def __init__(self, host: str = "127.0.0.1", port: int = 9000) -> None:
+        self.host = host
+        self.port = port
+        self._socket: socket.socket | None = None
+        self._thread: threading.Thread | None = None
+        self._stop_event = threading.Event()
+        self._cache = ResponseCache()
+        self._ready = threading.Event()
+
+    @property
+    def running(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
+    def start(self) -> None:
+        if self.running:
+            return
+
+        self._socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self._socket.bind((self.host, self.port))
+        self.port = self._socket.getsockname()[1]
+        self._stop_event.clear()
+        self._ready.clear()
+        self._thread = threading.Thread(target=self._serve, daemon=True)
+        self._thread.start()
+        self._ready.wait(timeout=2.0)
+
+    def _serve(self) -> None:
+        if self._socket is None:
+            return
+
+        self._socket.settimeout(0.2)
+        self._ready.set()
+
+        while not self._stop_event.is_set():
+            try:
+                packet, address = self._socket.recvfrom(MAX_PACKET + 1)
+            except socket.timeout:
+                continue
+            except OSError:
+                if self._stop_event.is_set():
+                    break
+                raise
+
+            try:
+                message_type, sequence, payload = decode_packet(packet)
+
+                if message_type != TYPE_MESSAGE:
+                    print(f"Ignored non-message packet from {address}")
+                    continue
+
+                request_key = (address[0], address[1], sequence)
+                cached_response = self._cache.lookup(request_key)
+                if cached_response is not None:
+                    self._socket.sendto(cached_response, address)
+                    continue
+
+                message = payload.decode("utf-8", errors="replace")
+                print(f"[{address[0]}:{address[1]}] {message}")
+
+                response_payload = b"Received: " + payload
+                response = encode_packet(TYPE_RESPONSE, sequence, response_payload)
+                ack = encode_packet(TYPE_ACK, sequence, b"")
+                self._cache.store(request_key, response)
+                self._socket.sendto(ack, address)
+                self._socket.sendto(response, address)
+            except SNPError as exc:
+                print(f"Rejected packet from {address}: {exc}")
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        if self._socket is not None:
+            self._socket.close()
+        if self._thread is not None:
+            self._thread.join(timeout=2.0)
+            self._thread = None
+        self._socket = None
+
+
 def run_server(host: str, port: int) -> None:
     """Listen for SNP messages and respond to clients over UDP."""
     cache = ResponseCache()
@@ -218,30 +335,33 @@ def send_reliable_message(
             client.settimeout(timeout)
             client.sendto(encode_packet(TYPE_MESSAGE, sequence, payload), (host, port))
 
-            try:
-                response, address = client.recvfrom(MAX_PACKET + 1)
-            except socket.timeout:
-                if attempt + 1 >= max_retries:
-                    raise TimeoutError("Reliable SNP request timed out")
-                time.sleep(backoff * (2**attempt))
-                continue
+            while True:
+                try:
+                    response, address = client.recvfrom(MAX_PACKET + 1)
+                except socket.timeout:
+                    if attempt + 1 >= max_retries:
+                        raise TimeoutError("Reliable SNP request timed out")
+                    time.sleep(backoff * (2**attempt))
+                    break
 
-            message_type, response_sequence, response_payload = decode_packet(response)
+                message_type, response_sequence, response_payload = decode_packet(response)
 
-            if message_type == TYPE_ACK:
-                continue
+                if message_type == TYPE_ACK:
+                    if response_sequence != sequence:
+                        continue
+                    continue
 
-            if message_type != TYPE_RESPONSE:
-                raise SNPError("Expected an SNP response")
+                if message_type != TYPE_RESPONSE:
+                    raise SNPError("Expected an SNP response")
 
-            if response_sequence != sequence:
-                continue
+                if response_sequence != sequence:
+                    continue
 
-            if address[0] != host:
-                raise SNPError("Response came from an unexpected host")
+                if address[0] != host:
+                    raise SNPError("Response came from an unexpected host")
 
-            tracker.complete(sequence)
-            return response_payload.decode("utf-8", errors="replace")
+                tracker.complete(sequence)
+                return response_payload.decode("utf-8", errors="replace")
 
     raise TimeoutError("Reliable SNP request timed out")
 
