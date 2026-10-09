@@ -6,6 +6,7 @@ import argparse
 import socket
 import struct
 import sys
+import time
 
 # SNP wire format
 MAGIC = b"SNPK"
@@ -13,6 +14,7 @@ VERSION = 1
 
 TYPE_MESSAGE = 1
 TYPE_RESPONSE = 2
+TYPE_ACK = 3
 
 # magic, version, type, sequence number, payload length
 HEADER = struct.Struct("!4sBBIH")
@@ -21,6 +23,9 @@ HEADER_SIZE = HEADER.size
 MAX_PAYLOAD = 1200
 MAX_PACKET = HEADER_SIZE + MAX_PAYLOAD
 MAX_SEQUENCE = 0xFFFFFFFF
+RELIABLE_TIMEOUT = 1.0
+RELIABLE_MAX_RETRIES = 3
+RELIABLE_BACKOFF = 0.25
 
 
 class SNPError(Exception):
@@ -60,9 +65,38 @@ class RequestTracker:
         self._pending.discard(sequence)
 
 
+class ResponseCache:
+    """Cache server responses so duplicate requests can be answered without re-running the operation."""
+
+    def __init__(self, capacity: int = 128, ttl_seconds: int = 30) -> None:
+        self.capacity = max(1, capacity)
+        self.ttl_seconds = max(1, ttl_seconds)
+        self._entries: dict[tuple[str, int, int], tuple[float, bytes]] = {}
+
+    def _purge_expired(self) -> None:
+        cutoff = time.monotonic() - self.ttl_seconds
+        for key, (timestamp, _) in list(self._entries.items()):
+            if timestamp <= cutoff:
+                del self._entries[key]
+
+    def store(self, key: tuple[str, int, int], value: bytes) -> None:
+        self._purge_expired()
+        if len(self._entries) >= self.capacity:
+            oldest_key = next(iter(self._entries))
+            del self._entries[oldest_key]
+        self._entries[key] = (time.monotonic(), value)
+
+    def lookup(self, key: tuple[str, int, int]) -> bytes | None:
+        self._purge_expired()
+        entry = self._entries.get(key)
+        if entry is None:
+            return None
+        return entry[1]
+
+
 def encode_packet(message_type: int, sequence: int, payload: bytes) -> bytes:
     """Serialize an SNP packet into bytes."""
-    if message_type not in (TYPE_MESSAGE, TYPE_RESPONSE):
+    if message_type not in (TYPE_MESSAGE, TYPE_RESPONSE, TYPE_ACK):
         raise SNPError("Unsupported message type")
 
     if not 0 <= sequence <= 0xFFFFFFFF:
@@ -111,7 +145,7 @@ def decode_packet(packet: bytes) -> tuple[int, int, bytes]:
     if version != VERSION:
         raise SNPError(f"Unsupported SNP version: {version}")
 
-    if message_type not in (TYPE_MESSAGE, TYPE_RESPONSE):
+    if message_type not in (TYPE_MESSAGE, TYPE_RESPONSE, TYPE_ACK):
         raise SNPError(f"Unknown message type: {message_type}")
 
     payload = packet[HEADER_SIZE:]
@@ -124,6 +158,8 @@ def decode_packet(packet: bytes) -> tuple[int, int, bytes]:
 
 def run_server(host: str, port: int) -> None:
     """Listen for SNP messages and respond to clients over UDP."""
+    cache = ResponseCache()
+
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as server:
         server.bind((host, port))
         print(f"SNP server listening on {host}:{port} (UDP)")
@@ -138,18 +174,76 @@ def run_server(host: str, port: int) -> None:
                     print(f"Ignored non-message packet from {address}")
                     continue
 
+                request_key = (address[0], address[1], sequence)
+                cached_response = cache.lookup(request_key)
+                if cached_response is not None:
+                    server.sendto(cached_response, address)
+                    continue
+
                 message = payload.decode("utf-8", errors="replace")
                 print(f"[{address[0]}:{address[1]}] {message}")
 
+                response_payload = b"Received: " + payload
                 response = encode_packet(
                     TYPE_RESPONSE,
                     sequence,
-                    b"Received: " + payload,
+                    response_payload,
                 )
+                ack = encode_packet(TYPE_ACK, sequence, b"")
+                cache.store(request_key, response)
+                server.sendto(ack, address)
                 server.sendto(response, address)
 
             except SNPError as exc:
                 print(f"Rejected packet from {address}: {exc}")
+
+
+def send_reliable_message(
+    host: str,
+    port: int,
+    message: str,
+    *,
+    timeout: float = RELIABLE_TIMEOUT,
+    max_retries: int = RELIABLE_MAX_RETRIES,
+    backoff: float = RELIABLE_BACKOFF,
+    socket_factory=socket.socket,
+) -> str:
+    """Send a request with bounded retries and duplicate suppression for UDP datagrams."""
+    payload = message.encode("utf-8")
+    tracker = RequestTracker()
+    sequence = tracker.allocate()
+
+    for attempt in range(max_retries):
+        with socket_factory(socket.AF_INET, socket.SOCK_DGRAM) as client:
+            client.settimeout(timeout)
+            client.sendto(encode_packet(TYPE_MESSAGE, sequence, payload), (host, port))
+
+            try:
+                response, address = client.recvfrom(MAX_PACKET + 1)
+            except socket.timeout:
+                if attempt + 1 >= max_retries:
+                    raise TimeoutError("Reliable SNP request timed out")
+                time.sleep(backoff * (2**attempt))
+                continue
+
+            message_type, response_sequence, response_payload = decode_packet(response)
+
+            if message_type == TYPE_ACK:
+                continue
+
+            if message_type != TYPE_RESPONSE:
+                raise SNPError("Expected an SNP response")
+
+            if response_sequence != sequence:
+                continue
+
+            if address[0] != host:
+                raise SNPError("Response came from an unexpected host")
+
+            tracker.complete(sequence)
+            return response_payload.decode("utf-8", errors="replace")
+
+    raise TimeoutError("Reliable SNP request timed out")
 
 
 def run_client(host: str, port: int, message: str) -> None:

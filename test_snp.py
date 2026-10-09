@@ -9,12 +9,15 @@ from snp import (
     HEADER_SIZE,
     TYPE_MESSAGE,
     TYPE_RESPONSE,
+    TYPE_ACK,
     MAX_PAYLOAD,
     SNPError,
     RequestTracker,
+    ResponseCache,
     encode_packet,
     decode_packet,
     next_sequence,
+    send_reliable_message,
 )
 
 
@@ -118,6 +121,55 @@ class SNPTests(unittest.TestCase):
     def test_sequence_wraparound(self):
         self.assertEqual(next_sequence(0xFFFFFFFF), 0)
         self.assertEqual(next_sequence(0xFFFFFFFE), 0xFFFFFFFF)
+
+    def test_response_cache_reuses_duplicate_requests(self):
+        cache = ResponseCache(capacity=8, ttl_seconds=30)
+        key = ("127.0.0.1", 9000, 3)
+        cache.store(key, b"reply")
+
+        self.assertEqual(cache.lookup(key), b"reply")
+        self.assertIsNone(cache.lookup(("127.0.0.1", 9000, 99)))
+
+    def test_reliable_message_retries_after_timeout(self):
+        calls = {"count": 0}
+
+        class FakeSocket:
+            def __init__(self, family, socktype):
+                self.family = family
+                self.socktype = socktype
+                self.timeout = None
+
+            def settimeout(self, value):
+                self.timeout = value
+
+            def sendto(self, packet, address):
+                calls["count"] += 1
+
+            def recvfrom(self, size):
+                if calls["count"] == 1:
+                    raise socket.timeout()
+                return encode_packet(TYPE_RESPONSE, 0, b"OK"), ("127.0.0.1", 9000)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        import socket
+
+        response = send_reliable_message(
+            "127.0.0.1",
+            9000,
+            "hello",
+            socket_factory=lambda *args, **kwargs: FakeSocket(*args, **kwargs),
+            timeout=0.01,
+            max_retries=2,
+            backoff=0.0,
+        )
+
+        self.assertEqual(response, "OK")
+        self.assertEqual(calls["count"], 2)
 
 
 if __name__ == "__main__":
