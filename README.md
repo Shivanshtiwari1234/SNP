@@ -1,5 +1,7 @@
 # Shivi Network Protocol (SNP)
 
+Version: 0.1.0
+
 SNP is a lightweight UDP-based application protocol for simple request/response exchanges between a client and a server. The current implementation is intentionally small and focused on binary packet validation, transport over IPv4 UDP, and straightforward message delivery without higher-level reliability guarantees.
 
 ## Purpose
@@ -161,6 +163,18 @@ python snp.py send "Hello from SNP!" --host 127.0.0.1 --port 9000
 ```
 
 The client sends a MESSAGE packet and waits for a RESPONSE packet with the same sequence number.
+
+## Installation and local usage
+
+Clone the repository and run the project from the root directory:
+
+```bash
+git clone <repository-url>
+cd SNP
+python -m unittest -q
+```
+
+The protocol library is importable as `snp` and the command-line interface remains available through the package entry point and the existing script pattern. For a basic local exchange, start one process as a server and then send a message from a client process using the public API or direct UDP helpers.
 
 ## Public peer API
 
