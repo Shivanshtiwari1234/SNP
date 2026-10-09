@@ -11,8 +11,10 @@ from snp import (
     TYPE_RESPONSE,
     MAX_PAYLOAD,
     SNPError,
+    RequestTracker,
     encode_packet,
     decode_packet,
+    next_sequence,
 )
 
 
@@ -99,6 +101,23 @@ class SNPTests(unittest.TestCase):
 
         with self.assertRaises(SNPError):
             decode_packet("not-bytes")
+
+
+    def test_request_tracker_matches_out_of_order_responses(self):
+        tracker = RequestTracker()
+
+        first = tracker.allocate()
+        second = tracker.allocate()
+
+        self.assertEqual(first, 0)
+        self.assertEqual(second, 1)
+        self.assertTrue(tracker.accepts_response(second))
+        self.assertTrue(tracker.accepts_response(first))
+        self.assertFalse(tracker.accepts_response(999))
+
+    def test_sequence_wraparound(self):
+        self.assertEqual(next_sequence(0xFFFFFFFF), 0)
+        self.assertEqual(next_sequence(0xFFFFFFFE), 0xFFFFFFFF)
 
 
 if __name__ == "__main__":
