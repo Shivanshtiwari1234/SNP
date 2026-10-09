@@ -3,6 +3,8 @@
 """Shivi Network Protocol (SNP) — initial implementation."""
 
 import argparse
+import hashlib
+import hmac
 import json
 import socket
 import struct
@@ -20,6 +22,7 @@ TYPE_ACK = 3
 TYPE_FRAGMENT = 4
 TYPE_DISCOVERY_REQUEST = 5
 TYPE_DISCOVERY_RESPONSE = 6
+TYPE_SECURE = 7
 
 # magic, version, type, sequence number, payload length
 HEADER = struct.Struct("!4sBBIH")
@@ -29,6 +32,8 @@ MAX_PAYLOAD = 1200
 MAX_PACKET = HEADER_SIZE + MAX_PAYLOAD
 MAX_SEQUENCE = 0xFFFFFFFF
 FRAGMENT_HEADER = struct.Struct("!HH")
+SECURE_NONCE_SIZE = 16
+SECURE_TAG_SIZE = hashlib.sha256().digest_size
 RELIABLE_TIMEOUT = 1.0
 RELIABLE_MAX_RETRIES = 3
 RELIABLE_BACKOFF = 0.25
@@ -174,9 +179,47 @@ def fragment_message(sequence: int, payload: bytes) -> list[bytes]:
     return fragments
 
 
+def secure_encode(secret: bytes, payload: bytes) -> bytes:
+    """Wrap a payload in a keyed HMAC so the packet cannot be altered without detection."""
+    if not secret:
+        raise SNPError("A non-empty shared secret is required")
+
+    if not isinstance(payload, (bytes, bytearray, memoryview)):
+        raise SNPError("Payload must be bytes-like data")
+
+    payload = bytes(payload)
+    nonce = hmac.new(secret, str(time.monotonic_ns()).encode("utf-8"), hashlib.sha256).digest()[:SECURE_NONCE_SIZE]
+    message = nonce + payload
+    tag = hmac.new(secret, message, hashlib.sha256).digest()
+    return encode_packet(TYPE_SECURE, 0, message + tag)
+
+
+def secure_decode(packet: bytes, secret: bytes) -> bytes:
+    """Verify and unwrap a secure packet using the configured shared key."""
+    if not secret:
+        raise SNPError("A non-empty shared secret is required")
+
+    message_type, _, message = decode_packet(packet)
+    if message_type != TYPE_SECURE:
+        raise SNPError("Expected a secure SNP packet")
+
+    if len(message) < SECURE_NONCE_SIZE + SECURE_TAG_SIZE:
+        raise SNPError("Secure packet is too short for validation")
+
+    nonce = message[:SECURE_NONCE_SIZE]
+    payload = message[SECURE_NONCE_SIZE:-SECURE_TAG_SIZE]
+    tag = message[-SECURE_TAG_SIZE:]
+    expected = hmac.new(secret, nonce + payload, hashlib.sha256).digest()
+
+    if not hmac.compare_digest(tag, expected):
+        raise SNPError("Secure packet authentication failed")
+
+    return payload
+
+
 def encode_packet(message_type: int, sequence: int, payload: bytes) -> bytes:
     """Serialize an SNP packet into bytes."""
-    if message_type not in (TYPE_MESSAGE, TYPE_RESPONSE, TYPE_ACK, TYPE_FRAGMENT, TYPE_DISCOVERY_REQUEST, TYPE_DISCOVERY_RESPONSE):
+    if message_type not in (TYPE_MESSAGE, TYPE_RESPONSE, TYPE_ACK, TYPE_FRAGMENT, TYPE_DISCOVERY_REQUEST, TYPE_DISCOVERY_RESPONSE, TYPE_SECURE):
         raise SNPError("Unsupported message type")
 
     if not 0 <= sequence <= 0xFFFFFFFF:
@@ -225,7 +268,7 @@ def decode_packet(packet: bytes) -> tuple[int, int, bytes]:
     if version != VERSION:
         raise SNPError(f"Unsupported SNP version: {version}")
 
-    if message_type not in (TYPE_MESSAGE, TYPE_RESPONSE, TYPE_ACK, TYPE_FRAGMENT, TYPE_DISCOVERY_REQUEST, TYPE_DISCOVERY_RESPONSE):
+    if message_type not in (TYPE_MESSAGE, TYPE_RESPONSE, TYPE_ACK, TYPE_FRAGMENT, TYPE_DISCOVERY_REQUEST, TYPE_DISCOVERY_RESPONSE, TYPE_SECURE):
         raise SNPError(f"Unknown message type: {message_type}")
 
     payload = packet[HEADER_SIZE:]

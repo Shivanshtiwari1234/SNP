@@ -199,6 +199,20 @@ print(peers)
 
 This mechanism is intentionally lightweight and does not establish trust or authentication. A discovered peer is only an addressable SNP endpoint, not an authenticated service.
 
+## Secure communication
+
+The project includes an optional authenticated packet wrapper based on a shared secret and a keyed HMAC. Secure packets use `TYPE_SECURE` and include a nonce plus a SHA-256 HMAC tag so modifications are rejected before processing.
+
+```python
+from snp import secure_encode, secure_decode
+
+secret = b"shared-secret"
+packet = secure_encode(secret, b"secret payload")
+print(secure_decode(packet, secret))
+```
+
+This layer provides integrity and peer authentication for trusted shared-secret deployments, but it does not provide confidentiality by itself. See [SECURITY.md](SECURITY.md) for the full threat model and design notes.
+
 ## Running the tests
 
 Use the standard library test runner:

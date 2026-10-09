@@ -15,6 +15,7 @@ from snp import (
     TYPE_FRAGMENT,
     TYPE_DISCOVERY_REQUEST,
     TYPE_DISCOVERY_RESPONSE,
+    TYPE_SECURE,
     MAX_PACKET,
     MAX_PAYLOAD,
     SNPError,
@@ -28,6 +29,8 @@ from snp import (
     decode_packet,
     fragment_message,
     next_sequence,
+    secure_decode,
+    secure_encode,
     send_reliable_message,
 )
 
@@ -243,6 +246,22 @@ class SNPTests(unittest.TestCase):
         self.assertTrue(peers)
         self.assertIn("snp", peers[0].get("service", ""))
         responder.close()
+
+    def test_secure_message_round_trip_and_tamper_rejection(self):
+        secret = b"super-secret-key"
+        payload = b"confidential payload"
+
+        packet = secure_encode(secret, payload)
+        self.assertEqual(decode_packet(packet)[0], TYPE_SECURE)
+        self.assertEqual(secure_decode(packet, secret), payload)
+
+        tampered = bytearray(packet)
+        tampered[-1] ^= 0xFF
+        with self.assertRaises(SNPError):
+            secure_decode(bytes(tampered), secret)
+
+        with self.assertRaises(SNPError):
+            secure_decode(packet, b"wrong-key")
 
 
 if __name__ == "__main__":
